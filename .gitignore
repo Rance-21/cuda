@@ -1,0 +1,6 @@
+.vscode
+build
+.cache
+scripts
+.clang-format
+NSIGHT.md
