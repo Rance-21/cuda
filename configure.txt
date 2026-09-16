@@ -1,0 +1,107 @@
+检测到 1 个 CUDA 设备：
+
+==================== [Device 0: NVIDIA GeForce RTX 5070 Laptop GPU] ====================
+  [微架构与基础时钟]
+  - 计算能力 (Compute Capability)       : 12.0
+  - SM 数量 (Streaming Multiprocessors) : 36
+
+  [显存与缓存子系统]
+  - 全局显存容量 (Global Memory)       : 7.96 GiB (8546484224 bytes)
+  - L2 缓存容量 (L2 Cache)              : 32768 KiB
+  - 常量内存容量 (Constant Memory cmem) : 64 KiB
+  - 显存位宽 (Memory Bus Width)         : 128 bits
+
+  [单个 SM 硬件槽位与资源上限]
+  - Warp 尺寸 (Warp Size)              : 32 线程
+  - 最大驻留线程数 (Max Threads/SM)    : 1536 (最大 48 Warps)
+  - 最大驻留 Block 数 (Max Blocks/SM)  : 24
+  - 物理 32-bit 寄存器堆总量           : 65536 个 (约 256 KiB)
+  - 最大共享内存总量 (Shared Memory/SM): 100 KiB
+
+  [单个 Block 资源约束]
+  - 单 Block 最大线程数                : 1024
+  - 单 Block 最大寄存器配额            : 65536
+  - 静态共享内存上限 (Default SMEM)    : 48 KiB
+  - 动态共享内存上限 (Opt-in SMEM)     : 99 KiB
+  - Block 最大维度限制 (x, y, z)       : [1024, 1024, 64]
+  - Grid 最大维度限制  (x, y, z)       : [2147483647, 65535, 65535]
+
+  [高级硬件特性支持]
+  - 多 Kernel 并发执行 (Concurrent)    : 支持
+  - 异步数据搬运引擎数 (Copy Engines)  : 1
+  - 协同启动 (Cooperative Groups)      : 支持
+  - 线程块簇 (Cluster / DSMEM)         : 硬件原生支持 (Hopper+)
+=================================================================
+
+
+void print_cuda_device_info() {
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+
+    if (err != cudaSuccess) {
+        printf("[CUDA Error] 获取设备数量失败: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
+    if (device_count == 0) {
+        printf("未检测到可用的 NVIDIA CUDA 设备。\n");
+        return;
+    }
+
+    printf("检测到 %d 个 CUDA 设备：\n", device_count);
+
+    for (int dev = 0; dev < device_count; ++dev) {
+        cudaDeviceProp prop;
+        err = cudaGetDeviceProperties(&prop, dev);
+        if (err != cudaSuccess) {
+            printf("[CUDA Error] 获取 Device %d 属性失败: %s\n", dev, cudaGetErrorString(err));
+            continue;
+        }
+
+        printf("\n==================== [Device %d: %s] ====================\n", dev, prop.name);
+
+        // 1. 核心架构与算力
+        printf("  [微架构与基础时钟]\n");
+        printf("  - 计算能力 (Compute Capability)       : %d.%d\n", prop.major, prop.minor);
+        printf("  - SM 数量 (Streaming Multiprocessors) : %d\n", prop.multiProcessorCount);
+
+        // 2. 显存与缓存规格
+        printf("\n  [显存与缓存子系统]\n");
+        double global_mem_gib = static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0);
+        printf("  - 全局显存容量 (Global Memory)       : %.2f GiB (%zu bytes)\n", global_mem_gib, prop.totalGlobalMem);
+        printf("  - L2 缓存容量 (L2 Cache)              : %d KiB\n", prop.l2CacheSize / 1024);
+        printf("  - 常量内存容量 (Constant Memory cmem) : %zu KiB\n", prop.totalConstMem / 1024);
+        printf("  - 显存位宽 (Memory Bus Width)         : %d bits\n", prop.memoryBusWidth);
+
+        // 3. SM 级物理槽位与配额（决定 Occupancy 的四个硬上限）
+        printf("\n  [单个 SM 硬件槽位与资源上限]\n");
+        printf("  - Warp 尺寸 (Warp Size)              : %d 线程\n", prop.warpSize);
+        printf("  - 最大驻留线程数 (Max Threads/SM)    : %d (最大 %d Warps)\n", prop.maxThreadsPerMultiProcessor,
+               prop.maxThreadsPerMultiProcessor / prop.warpSize);
+        printf("  - 最大驻留 Block 数 (Max Blocks/SM)  : %d\n", prop.maxBlocksPerMultiProcessor);
+        printf("  - 物理 32-bit 寄存器堆总量           : %d 个 (约 %d KiB)\n", prop.regsPerMultiprocessor,
+               (prop.regsPerMultiprocessor * 4) / 1024);
+        printf("  - 最大共享内存总量 (Shared Memory/SM): %zu KiB\n", prop.sharedMemPerMultiprocessor / 1024);
+
+        // 4. Block 级资源分配约束
+        printf("\n  [单个 Block 资源约束]\n");
+        printf("  - 单 Block 最大线程数                : %d\n", prop.maxThreadsPerBlock);
+        printf("  - 单 Block 最大寄存器配额            : %d\n", prop.regsPerBlock);
+        printf("  - 静态共享内存上限 (Default SMEM)    : %zu KiB\n", prop.sharedMemPerBlock / 1024);
+        printf("  - 动态共享内存上限 (Opt-in SMEM)     : %zu KiB\n", prop.sharedMemPerBlockOptin / 1024);
+        printf("  - Block 最大维度限制 (x, y, z)       : [%d, %d, %d]\n", prop.maxThreadsDim[0], prop.maxThreadsDim[1],
+               prop.maxThreadsDim[2]);
+        printf("  - Grid 最大维度限制  (x, y, z)       : [%d, %d, %d]\n", prop.maxGridSize[0], prop.maxGridSize[1],
+               prop.maxGridSize[2]);
+
+        // 5. 并发与高级硬件特性
+        printf("\n  [高级硬件特性支持]\n");
+        printf("  - 多 Kernel 并发执行 (Concurrent)    : %s\n", prop.concurrentKernels ? "支持" : "不支持");
+        printf("  - 异步数据搬运引擎数 (Copy Engines)  : %d\n", prop.asyncEngineCount);
+        printf("  - 协同启动 (Cooperative Groups)      : %s\n", prop.cooperativeLaunch ? "支持" : "不支持");
+        printf("  - 线程块簇 (Cluster / DSMEM)         : %s\n",
+               (prop.major >= 9) ? "硬件原生支持 (Hopper+)" : "不支持");
+
+        printf("=================================================================\n");
+    }
+}
