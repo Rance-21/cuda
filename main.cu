@@ -10,6 +10,7 @@
 单个warp内__syncthreads()导致dead lock
 Volta架构及以后可以，每个thread有单独的PC，靠SMSP的广播掩码实现，但是有L1 i-cache的开销
 */
+
 #define CUDA_CHECK(call)                                                                                               \
     do {                                                                                                               \
         cudaError_t err = (call);                                                                                      \
@@ -63,7 +64,7 @@ void block_sum(const float *h_input, float *h_output, int n) {
     float *d_output;
 
     CUDA_CHECK(cudaMalloc(&d_input, n * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_input, h_input, blocks * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_input, h_input, n * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&d_output, blocks * sizeof(float)));
 
     // 第三个参数是shared_memory_bytes
@@ -151,6 +152,118 @@ void vector_add() {
     CUDA_CHECK(cudaFree(d_c));
 }
 
+__global__ void normal_kernel(const float *x, float *y, int n, float scale, float bias) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= n)
+        return;
+
+    float v = x[i];
+
+    v = v * scale + bias;
+
+    if (v < 0.0f)
+        v = 0.0f;
+
+    y[i] = v;
+}
+
+// 实际差距要大，因为这个内核函数没利用合并访存
+__global__ void coarse_kernel(const float *x, float *y, int n, float scale, float bias) {
+    constexpr int ITEMS = 32;
+
+    int start = (blockIdx.x * blockDim.x + threadIdx.x) * ITEMS;
+
+    // 每个线程暂存 32 个元素。
+    float v[ITEMS];
+
+#pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        int i = start + j;
+
+        if (i < n)
+            v[j] = x[i];
+        else
+            v[j] = 0.0f;
+    }
+
+// 对 32 个元素做融合操作。
+#pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        v[j] = v[j] * scale + bias;
+
+        if (v[j] < 0.0f)
+            v[j] = 0.0f;
+    }
+
+// 最后统一写回。
+#pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        int i = start + j;
+
+        if (i < n)
+            y[i] = v[j];
+    }
+}
+
+void run_normal(const float *d_x, float *d_y, int n) {
+    constexpr int threads = 512;
+
+    int blocks = (n + threads - 1) / threads;
+
+    normal_kernel<<<blocks, threads>>>(d_x, d_y, n, 1.1f, -0.2f);
+}
+
+void run_coarse(const float *d_x, float *d_y, int n) {
+    constexpr int threads = 512;
+    constexpr int items = 32;
+
+    int blocks = (n + threads * items - 1) / (threads * items);
+
+    coarse_kernel<<<blocks, threads>>>(d_x, d_y, n, 1.1f, -0.2f);
+}
+
+void run_register_cliff() {
+    constexpr int N = 1 << 25;
+
+    size_t bytes = N * sizeof(float);
+
+    float *d_x;
+    float *d_y;
+
+    cudaMalloc(&d_x, bytes);
+    cudaMalloc(&d_y, bytes);
+
+    cudaMemset(d_x, 0, bytes);
+
+    cudaFuncAttributes normal_attr{};
+    cudaFuncAttributes coarse_attr{};
+
+    cudaFuncGetAttributes(&normal_attr, normal_kernel);
+
+    cudaFuncGetAttributes(&coarse_attr, coarse_kernel);
+
+    int normal_blocks;
+    int coarse_blocks;
+
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&normal_blocks, normal_kernel, 512, 0);
+
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&coarse_blocks, coarse_kernel, 512, 0);
+
+    std::printf("Normal : %d registers/thread, %d blocks/SM\n", normal_attr.numRegs, normal_blocks);
+
+    std::printf("Coarse : %d registers/thread, %d blocks/SM\n", coarse_attr.numRegs, coarse_blocks);
+
+    run_normal(d_x, d_y, N);
+    cudaDeviceSynchronize();
+
+    run_coarse(d_x, d_y, N);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_x);
+    cudaFree(d_y);
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         std::printf("请正确传参！");
@@ -159,20 +272,37 @@ int main(int argc, char *argv[]) {
 
     char choice = *argv[1];
     switch (choice) {
-    case 1: {
+    case '1': {
+        std::printf("执行向量加法");
+
         vector_add();
+
+        break;
     }
-    case 2: {
-        float *h_input;
+    case '2': {
+        std::printf("执行规约(__syncthreads)");
+
+        float h_input[1024];
         for (int i = 0; i < 1024; ++i) {
             h_input[i] = static_cast<float>(i + 1);
         }
-        float *h_output;
+
+        float h_output[1024];
+
         block_sum(h_input, h_output, 1024);
 
         for (int i = 0; i < 4; i++) {
-            std::printf("%f", h_output[i]);
+            std::printf("%f ", h_output[i]);
         }
+
+        break;
+    }
+    case '3': {
+        std::printf("执行每个线程寄存器过多导致分配不满。性能悬崖");
+
+        run_register_cliff();
+
+        break;
     }
     }
 }
