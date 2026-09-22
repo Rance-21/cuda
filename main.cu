@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <vector>
+#include <cuda_fp16.h>
 
 // 研究GPU矩阵转置算法
 /*
@@ -11,25 +12,34 @@
 Volta架构及以后可以，每个thread有单独的PC，靠SMSP的广播掩码实现，但是有L1 i-cache的开销
 */
 
-#define CUDA_CHECK(call)                                                                                               \
-    do {                                                                                                               \
-        cudaError_t err = (call);                                                                                      \
-        if (err != cudaSuccess) {                                                                                      \
-            std::fprintf(stderr, "CUDA error: %s (%s:%d)\n", cudaGetErrorString(err), __FILE__, __LINE__);             \
-            std::exit(EXIT_FAILURE);                                                                                   \
-        }                                                                                                              \
+#define CUDA_CHECK(call)                                                                                   \
+    do                                                                                                     \
+    {                                                                                                      \
+        cudaError_t err = (call);                                                                          \
+        if (err != cudaSuccess)                                                                            \
+        {                                                                                                  \
+            std::fprintf(stderr, "CUDA error: %s (%s:%d)\n", cudaGetErrorString(err), __FILE__, __LINE__); \
+            std::exit(EXIT_FAILURE);                                                                       \
+        }                                                                                                  \
     } while (0)
 
-__global__ void vector_add(const float *a, const float *b, float *c, int n) {
+__global__ void transpose_naive_fp16_1(
+    const __half *input,
+    __half *output);
+
+__global__ void vector_add(const float *a, const float *b, float *c, int n)
+{
     // 当前线程负责的数组位置。
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i < n) {
+    if (i < n)
+    {
         c[i] = a[i] + b[i];
     }
 }
 
-__global__ void block_sum_kernel(const float *input, float *output, int n) {
+__global__ void block_sum_kernel(const float *input, float *output, int n)
+{
     extern __shared__ float s[];
 
     int tid = threadIdx.x;
@@ -40,8 +50,10 @@ __global__ void block_sum_kernel(const float *input, float *output, int n) {
     // 必须等整个 block 都写完
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-        if (tid < stride) {
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
+    {
+        if (tid < stride)
+        {
             s[tid] += s[tid + stride];
         }
 
@@ -51,12 +63,14 @@ __global__ void block_sum_kernel(const float *input, float *output, int n) {
     }
 
     // block 的最终结果
-    if (tid == 0) {
+    if (tid == 0)
+    {
         output[blockIdx.x] = s[0];
     }
 }
 
-void block_sum(const float *h_input, float *h_output, int n) {
+void block_sum(const float *h_input, float *h_output, int n)
+{
     constexpr int threads = 256;
     int blocks = (n + threads - 1) / threads;
 
@@ -75,7 +89,8 @@ void block_sum(const float *h_input, float *h_output, int n) {
     CUDA_CHECK(cudaFree(d_output));
 }
 
-void vector_add() {
+void vector_add()
+{
     // 强制编译期计算
     constexpr int N = 1 << 24;
     constexpr int THREADS = 256;
@@ -119,7 +134,8 @@ void vector_add() {
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
 
-    for (int i = 0; i < REPEAT; ++i) {
+    for (int i = 0; i < REPEAT; ++i)
+    {
         vector_add<<<blocks, THREADS>>>(d_a, d_b, d_c, N);
     }
 
@@ -152,7 +168,8 @@ void vector_add() {
     CUDA_CHECK(cudaFree(d_c));
 }
 
-__global__ void normal_kernel(const float *x, float *y, int n, float scale, float bias) {
+__global__ void normal_kernel(const float *x, float *y, int n, float scale, float bias)
+{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (i >= n)
@@ -169,7 +186,8 @@ __global__ void normal_kernel(const float *x, float *y, int n, float scale, floa
 }
 
 // 实际差距要大，因为这个内核函数没利用合并访存
-__global__ void coarse_kernel(const float *x, float *y, int n, float scale, float bias) {
+__global__ void coarse_kernel(const float *x, float *y, int n, float scale, float bias)
+{
     constexpr int ITEMS = 32;
 
     int start = (blockIdx.x * blockDim.x + threadIdx.x) * ITEMS;
@@ -178,7 +196,8 @@ __global__ void coarse_kernel(const float *x, float *y, int n, float scale, floa
     float v[ITEMS];
 
 #pragma unroll
-    for (int j = 0; j < ITEMS; ++j) {
+    for (int j = 0; j < ITEMS; ++j)
+    {
         int i = start + j;
 
         if (i < n)
@@ -189,7 +208,8 @@ __global__ void coarse_kernel(const float *x, float *y, int n, float scale, floa
 
 // 对 32 个元素做融合操作。
 #pragma unroll
-    for (int j = 0; j < ITEMS; ++j) {
+    for (int j = 0; j < ITEMS; ++j)
+    {
         v[j] = v[j] * scale + bias;
 
         if (v[j] < 0.0f)
@@ -198,7 +218,8 @@ __global__ void coarse_kernel(const float *x, float *y, int n, float scale, floa
 
 // 最后统一写回。
 #pragma unroll
-    for (int j = 0; j < ITEMS; ++j) {
+    for (int j = 0; j < ITEMS; ++j)
+    {
         int i = start + j;
 
         if (i < n)
@@ -206,7 +227,8 @@ __global__ void coarse_kernel(const float *x, float *y, int n, float scale, floa
     }
 }
 
-void run_normal(const float *d_x, float *d_y, int n) {
+void run_normal(const float *d_x, float *d_y, int n)
+{
     constexpr int threads = 512;
 
     int blocks = (n + threads - 1) / threads;
@@ -214,7 +236,8 @@ void run_normal(const float *d_x, float *d_y, int n) {
     normal_kernel<<<blocks, threads>>>(d_x, d_y, n, 1.1f, -0.2f);
 }
 
-void run_coarse(const float *d_x, float *d_y, int n) {
+void run_coarse(const float *d_x, float *d_y, int n)
+{
     constexpr int threads = 512;
     constexpr int items = 32;
 
@@ -223,7 +246,8 @@ void run_coarse(const float *d_x, float *d_y, int n) {
     coarse_kernel<<<blocks, threads>>>(d_x, d_y, n, 1.1f, -0.2f);
 }
 
-void run_register_cliff() {
+void run_register_cliff()
+{
     constexpr int N = 1 << 25;
 
     size_t bytes = N * sizeof(float);
@@ -264,26 +288,187 @@ void run_register_cliff() {
     cudaFree(d_y);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
+void run_transpose_benchmark()
+{
+    constexpr int N = 4096;
+
+    constexpr std::size_t ELEMENT_COUNT =
+        static_cast<std::size_t>(N) * N;
+
+    constexpr std::size_t MATRIX_BYTES =
+        ELEMENT_COUNT * sizeof(__half);
+
+    constexpr int WARMUP_COUNT = 10;
+    constexpr int TEST_COUNT = 100;
+
+    // 1. 构造 CPU 矩阵
+    std::vector<__half> h_input(ELEMENT_COUNT);
+    std::vector<__half> h_output(ELEMENT_COUNT);
+
+    for (int row = 0; row < N; ++row)
+    {
+        for (int col = 0; col < N; ++col)
+        {
+            // 控制在 FP16 可以精确表示的小整数范围内，
+            // 同时让 row/col 都影响数据，方便检查转置是否正确。
+            float value =
+                static_cast<float>((row * 131 + col * 17) % 2048);
+
+            h_input[static_cast<std::size_t>(row) * N + col] = __float2half(value);
+        }
+    }
+
+    // 2. 分配 GPU 内存
+    __half *d_input = nullptr;
+    __half *d_output = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_input, MATRIX_BYTES));
+    CUDA_CHECK(cudaMalloc(&d_output, MATRIX_BYTES));
+
+    CUDA_CHECK(cudaMemcpy(
+        d_input,
+        h_input.data(),
+        MATRIX_BYTES,
+        cudaMemcpyHostToDevice));
+
+    dim3 block(32, 32);
+    dim3 grid(N / 64, N / 64); // 64 × 64 blocks
+
+    // 4. Warm up
+    for (int i = 0; i < WARMUP_COUNT; ++i)
+    {
+        transpose_naive_fp16_1<<<grid, block>>>(
+            d_input,
+            d_output);
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // 5. CUDA Event 测纯 kernel 时间
+    cudaEvent_t start;
+    cudaEvent_t stop;
+
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+
+    for (int i = 0; i < TEST_COUNT; ++i)
+    {
+        transpose_naive_fp16_1<<<grid, block>>>(
+            d_input,
+            d_output);
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float total_ms = 0.0f;
+
+    CUDA_CHECK(cudaEventElapsedTime(
+        &total_ms,
+        start,
+        stop));
+
+    float average_ms =
+        total_ms / static_cast<float>(TEST_COUNT);
+
+    // 6. 算 effective bandwidth
+    double transferred_bytes =
+        2.0 * static_cast<double>(MATRIX_BYTES);
+
+    double seconds =
+        static_cast<double>(average_ms) * 1e-3;
+
+    double bandwidth_gbps =
+        transferred_bytes / seconds / 1e9;
+
+    std::printf(
+        "Matrix: %d x %d FP16\n"
+        "Kernel time: %.4f ms\n"
+        "Effective bandwidth: %.2f GB/s\n",
+        N,
+        N,
+        average_ms,
+        bandwidth_gbps);
+
+    // 7. 拷回并验证
+    // 不放进计时范围
+    CUDA_CHECK(cudaMemcpy(
+        h_output.data(),
+        d_output,
+        MATRIX_BYTES,
+        cudaMemcpyDeviceToHost));
+
+    bool correct = true;
+
+    for (int row = 0; row < N && correct; ++row)
+    {
+        for (int col = 0; col < N; ++col)
+        {
+
+            float input_value = __half2float(
+                h_input[static_cast<std::size_t>(row) * N + col]);
+
+            float output_value = __half2float(
+                h_output[static_cast<std::size_t>(col) * N + row]);
+
+            if (input_value != output_value)
+            {
+                std::printf(
+                    "Mismatch: input[%d][%d] = %.1f, "
+                    "output[%d][%d] = %.1f\n",
+                    row,
+                    col,
+                    input_value,
+                    col,
+                    row,
+                    output_value);
+
+                correct = false;
+                break;
+            }
+        }
+    }
+
+    std::printf(
+        "Correctness: %s\n",
+        correct ? "PASS" : "FAIL");
+    // 8. 清理
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_output));
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc != 2)
+    {
         std::printf("请正确传参！");
         return 0;
     }
 
     char choice = *argv[1];
-    switch (choice) {
-    case '1': {
+    switch (choice)
+    {
+    case '1':
+    {
         std::printf("执行向量加法");
 
         vector_add();
 
         break;
     }
-    case '2': {
+    case '2':
+    {
         std::printf("执行规约(__syncthreads)");
 
         float h_input[1024];
-        for (int i = 0; i < 1024; ++i) {
+        for (int i = 0; i < 1024; ++i)
+        {
             h_input[i] = static_cast<float>(i + 1);
         }
 
@@ -291,18 +476,79 @@ int main(int argc, char *argv[]) {
 
         block_sum(h_input, h_output, 1024);
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 4; i++)
+        {
             std::printf("%f ", h_output[i]);
         }
 
         break;
     }
-    case '3': {
+    case '3':
+    {
         std::printf("执行每个线程寄存器过多导致分配不满。性能悬崖");
 
         run_register_cliff();
 
         break;
     }
+    case '4':
+    {
+        std::printf("4096 * 4096 的 fp16 转置 ver 1 \n");
+        run_transpose_benchmark();
     }
+    }
+}
+
+// 4096 * 4096 矩阵转置，该显卡 1536 thread / block，会有大的浪费
+// dim3 block(32, 32) | dim3 grid(64, 64)
+__global__ void transpose_naive_fp16_1(
+    const __half *input,
+    __half *output)
+{
+    constexpr int N = 4096;
+    // 要处理的两行中的第一行
+    int global_row0 = (blockIdx.y * 64 + threadIdx.y);
+    int global_row1 = global_row0 + 32;
+    int global_col = (blockIdx.x * 64 + threadIdx.x * 2);
+    int tile_row0 = threadIdx.y;
+    int tile_row1 = tile_row0 + 32;
+    int tile_col = threadIdx.x * 2;
+
+    __shared__ __half tile[64][65];
+
+    __half2 fst_two_elm = *reinterpret_cast<const __half2 *>(
+        &input[global_row0 * N + global_col]);
+    __half2 scd_two_elm = *reinterpret_cast<const __half2 *>(
+        &input[global_row1 * N + global_col]);
+
+    // 正好避免 bank 冲突
+    tile[tile_row0][tile_col] = __low2half(fst_two_elm);
+    tile[tile_row0][tile_col + 1] = __high2half(fst_two_elm);
+    tile[tile_row1][tile_col] = __low2half(scd_two_elm);
+    tile[tile_row1][tile_col + 1] = __high2half(scd_two_elm);
+
+    __syncthreads();
+
+    // 转置后，这个 warp 负责 output tile 中的两行
+    int output_row0 = blockIdx.x * 64 + threadIdx.y * 2;
+    int output_row1 = output_row0 + 1;
+
+    // 每个线程负责该行中的两个连续元素
+    int output_col = blockIdx.y * 64 + threadIdx.x * 2;
+
+    // output_row0 对应原 tile 的第 2*threadIdx.y 列
+    __half2 out0 = __halves2half2(
+        tile[threadIdx.x * 2][threadIdx.y * 2],
+        tile[threadIdx.x * 2 + 1][threadIdx.y * 2]);
+
+    // output_row1 对应原 tile 的第 2*threadIdx.y+1 列
+    __half2 out1 = __halves2half2(
+        tile[threadIdx.x * 2][threadIdx.y * 2 + 1],
+        tile[threadIdx.x * 2 + 1][threadIdx.y * 2 + 1]);
+
+    *reinterpret_cast<__half2 *>(
+        &output[output_row0 * N + output_col]) = out0;
+
+    *reinterpret_cast<__half2 *>(
+        &output[output_row1 * N + output_col]) = out1;
 }
